@@ -4,14 +4,9 @@ import numpy as np
 import base64
 from datetime import datetime, timedelta
 import io
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch, cm
-from reportlab.pdfgen import canvas
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
+from fpdf import FPDF
+import tempfile
+import os
 
 # Configuração da página Streamlit
 st.set_page_config(
@@ -55,6 +50,19 @@ st.markdown(f"""
         text-align: center;
         border-radius: 5px;
         margin-bottom: 2rem;
+    }}
+    .download-button {{
+        display: inline-block;
+        padding: 0.5rem 1rem;
+        background-color: {VIOLETA};
+        color: white;
+        text-decoration: none;
+        border-radius: 4px;
+        font-weight: bold;
+        margin-top: 1rem;
+    }}
+    .download-button:hover {{
+        background-color: {AMARELO};
     }}
 </style>
 """, unsafe_allow_html=True)
@@ -100,87 +108,172 @@ def processar_arquivo(uploaded_file):
     
     return df
 
+# Classe PDF personalizada usando FPDF
+class PDF(FPDF):
+    def __init__(self):
+        super().__init__(orientation='L', unit='mm', format='A4')
+        self.add_page()
+        self.set_auto_page_break(auto=True, margin=15)
+        
+    def header(self):
+        # Cabeçalho violeta
+        self.set_fill_color(111, 56, 124)  # Violeta: #6F387C
+        self.rect(0, 0, 297, 20, 'F')
+        
+        # Texto do cabeçalho
+        self.set_font('Arial', 'B', 16)
+        self.set_text_color(255, 255, 255)  # Branco
+        self.cell(0, 15, 'Relatório de Contas a Receber', 0, 1, 'C')
+        
+        # Espaço após o cabeçalho
+        self.ln(5)
+        
+    def footer(self):
+        # Posição a 15mm do final
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.set_text_color(128, 128, 128)
+        self.cell(0, 10, f'Ilume Finanças - Relatório gerado em {datetime.now().strftime("%d/%m/%Y %H:%M")}', 0, 0, 'C')
+        self.cell(0, 10, f'Página {self.page_no()}', 0, 0, 'R')
+        
+    def add_title(self, title):
+        self.set_font('Arial', 'B', 14)
+        self.set_text_color(111, 56, 124)  # Violeta
+        self.cell(0, 10, title, 0, 1, 'L')
+        self.ln(2)
+        
+    def add_subtitle(self, subtitle):
+        self.set_font('Arial', 'B', 12)
+        self.set_text_color(111, 56, 124)  # Violeta
+        self.cell(0, 8, subtitle, 0, 1, 'L')
+        self.ln(2)
+        
+    def add_info_line(self, label, value):
+        self.set_font('Arial', '', 10)
+        self.set_text_color(0, 0, 0)
+        self.cell(40, 6, label, 0, 0, 'L')
+        self.cell(0, 6, value, 0, 1, 'L')
+        
+    def add_summary_box(self, resumo):
+        # Bloco de resumo com fundo bege
+        self.set_fill_color(247, 232, 201)  # Bege: #F7E8C9
+        self.set_draw_color(200, 200, 200)  # Cinza claro para bordas
+        
+        # Calcular altura do bloco
+        num_items = len(resumo)
+        box_height = num_items * 8 + 10  # 8mm por item + margens
+        
+        # Desenhar retângulo de fundo
+        start_y = self.get_y()
+        self.rect(10, start_y, 277, box_height, 'DF')
+        
+        # Título do resumo
+        self.set_xy(15, start_y + 5)
+        self.set_font('Arial', 'B', 12)
+        self.set_text_color(111, 56, 124)  # Violeta
+        self.cell(0, 8, 'Resumo Financeiro', 0, 1, 'L')
+        
+        # Itens do resumo
+        self.set_font('Arial', '', 10)
+        self.set_text_color(0, 0, 0)
+        
+        col_width = 130
+        for i, (key, value) in enumerate(resumo.items()):
+            self.set_xy(20, start_y + 15 + i * 8)
+            self.cell(col_width, 8, key, 0, 0, 'L')
+            self.cell(col_width, 8, value, 0, 0, 'R')
+        
+        # Avançar posição Y após o bloco
+        self.set_y(start_y + box_height + 5)
+        
+    def add_table(self, headers, data):
+        # Configurações da tabela
+        self.set_font('Arial', 'B', 10)
+        self.set_fill_color(111, 56, 124)  # Violeta: #6F387C
+        self.set_text_color(255, 255, 255)  # Branco
+        
+        # Calcular larguras das colunas
+        page_width = 277  # A4 paisagem = 297mm - margens
+        col_widths = []
+        
+        # Definir larguras específicas para certas colunas
+        col_mapping = {
+            'Descrição': 50,
+            'Cliente': 40,
+            'Valor (R$)': 25,
+            'A Receber (R$)': 25,
+            'Situação': 20
+        }
+        
+        # Calcular larguras
+        total_fixed_width = sum(col_mapping.get(h, 0) for h in headers)
+        remaining_width = page_width - total_fixed_width
+        default_width = remaining_width / (len(headers) - len([h for h in headers if h in col_mapping]))
+        
+        for header in headers:
+            col_widths.append(col_mapping.get(header, default_width))
+        
+        # Cabeçalho da tabela
+        for i, header in enumerate(headers):
+            self.cell(col_widths[i], 10, header, 1, 0, 'C', 1)
+        self.ln()
+        
+        # Dados da tabela
+        self.set_font('Arial', '', 9)
+        self.set_text_color(0, 0, 0)
+        
+        # Alternar cores de fundo para linhas
+        row_colors = [(255, 255, 255), (240, 240, 240)]
+        
+        for i, row in enumerate(data):
+            # Definir cor de fundo para linha alternada
+            if i % 2:
+                self.set_fill_color(*row_colors[1])
+            else:
+                self.set_fill_color(*row_colors[0])
+            
+            # Verificar se precisa de nova página
+            if self.get_y() + 6 > self.page_break_trigger:
+                self.add_page()
+                # Redesenhar cabeçalho da tabela
+                self.set_font('Arial', 'B', 10)
+                self.set_fill_color(111, 56, 124)  # Violeta
+                self.set_text_color(255, 255, 255)  # Branco
+                for j, header in enumerate(headers):
+                    self.cell(col_widths[j], 10, header, 1, 0, 'C', 1)
+                self.ln()
+                self.set_font('Arial', '', 9)
+                self.set_text_color(0, 0, 0)
+            
+            # Verificar coluna de situação para destacar "Em aberto"
+            situacao_idx = -1
+            if 'Situação' in headers:
+                situacao_idx = headers.index('Situação')
+            
+            # Imprimir células da linha
+            for j, cell in enumerate(row):
+                # Verificar se é coluna de situação e valor é "Em aberto"
+                if j == situacao_idx and cell.lower() == 'em aberto':
+                    # Salvar cor de preenchimento atual
+                    current_fill = self.fill_color
+                    # Mudar para amarelo
+                    self.set_fill_color(245, 157, 48)  # Amarelo: #F59D30
+                    self.set_text_color(255, 255, 255)  # Texto branco
+                    self.cell(col_widths[j], 6, cell, 1, 0, 'L', 1)
+                    # Restaurar cor original
+                    self.set_fill_color(*row_colors[i % 2])
+                    self.set_text_color(0, 0, 0)
+                else:
+                    # Alinhar à direita valores monetários
+                    align = 'R' if 'R$' in headers[j] else 'L'
+                    self.cell(col_widths[j], 6, cell, 1, 0, align, 1)
+            
+            self.ln()
+
 # Função para gerar o PDF
 def gerar_pdf(df, filtros, colunas_selecionadas):
-    buffer = io.BytesIO()
-    
-    # Configurar o documento PDF em modo paisagem
-    doc = SimpleDocTemplate(
-        buffer, 
-        pagesize=landscape(A4),
-        rightMargin=72, 
-        leftMargin=72,
-        topMargin=72, 
-        bottomMargin=72
-    )
-    
-    # Registrar fonte Lato se disponível, senão usar Arial
-    try:
-        pdfmetrics.registerFont(TTFont('Lato', '/usr/share/fonts/truetype/lato/Lato-Regular.ttf'))
-        pdfmetrics.registerFont(TTFont('Lato-Bold', '/usr/share/fonts/truetype/lato/Lato-Bold.ttf'))
-        font_name = 'Lato'
-        font_bold = 'Lato-Bold'
-    except:
-        # Fallback para Arial
-        font_name = 'Helvetica'
-        font_bold = 'Helvetica-Bold'
-    
-    # Estilos de parágrafo
-    styles = getSampleStyleSheet()
-    
-    # Estilo para título
-    title_style = ParagraphStyle(
-        'TitleStyle',
-        parent=styles['Heading1'],
-        fontName=font_bold,
-        fontSize=16,
-        textColor=colors.white,
-        alignment=1,  # Centralizado
-        spaceAfter=12
-    )
-    
-    # Estilo para subtítulo
-    subtitle_style = ParagraphStyle(
-        'SubtitleStyle',
-        parent=styles['Heading2'],
-        fontName=font_bold,
-        fontSize=14,
-        textColor=colors.HexColor(VIOLETA),
-        alignment=0,  # Esquerda
-        spaceAfter=6
-    )
-    
-    # Estilo para texto normal
-    normal_style = ParagraphStyle(
-        'NormalStyle',
-        parent=styles['Normal'],
-        fontName=font_name,
-        fontSize=10,
-        textColor=colors.black,
-        alignment=0  # Esquerda
-    )
-    
-    # Lista de elementos para o PDF
-    elements = []
-    
-    # Função para criar o cabeçalho
-    def header_footer(canvas, doc):
-        canvas.saveState()
-        
-        # Cabeçalho
-        canvas.setFillColor(colors.HexColor(VIOLETA))
-        canvas.rect(0, doc.height + doc.topMargin - 0.5*inch, doc.width + doc.leftMargin + doc.rightMargin, 1*inch, fill=True, stroke=False)
-        
-        canvas.setFont(font_bold, 16)
-        canvas.setFillColor(colors.white)
-        canvas.drawCentredString(doc.width/2 + doc.leftMargin, doc.height + doc.topMargin + 0.2*inch, "Relatório de Contas a Receber")
-        
-        # Rodapé
-        canvas.setFont(font_name, 8)
-        canvas.setFillColor(colors.black)
-        canvas.drawCentredString(doc.width/2 + doc.leftMargin, doc.bottomMargin - 0.2*inch, f"Ilume Finanças - Relatório gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-        
-        canvas.restoreState()
+    # Criar PDF
+    pdf = PDF()
     
     # Adicionar informações de filtro
     filtro_texto = []
@@ -192,10 +285,10 @@ def gerar_pdf(df, filtros, colunas_selecionadas):
         filtro_texto.append(f"Categoria: {filtros['categoria']}")
     
     if filtro_texto:
-        elements.append(Paragraph("Filtros aplicados:", subtitle_style))
+        pdf.add_title("Filtros aplicados:")
         for texto in filtro_texto:
-            elements.append(Paragraph(f"• {texto}", normal_style))
-        elements.append(Spacer(1, 0.2*inch))
+            pdf.add_info_line("•", texto)
+        pdf.ln(5)
     
     # Calcular resumo financeiro
     resumo = {}
@@ -226,40 +319,20 @@ def gerar_pdf(df, filtros, colunas_selecionadas):
         total = df[valor_col].sum()
         
         resumo = {
-            'Vencidos (R$)': vencidos,
-            'Vencem hoje (R$)': vencem_hoje,
-            'A vencer (R$)': a_vencer,
-            'Recebidos (R$)': recebidos,
-            'Total do Período (R$)': total
+            'Vencidos (R$)': f"R$ {vencidos:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'),
+            'Vencem hoje (R$)': f"R$ {vencem_hoje:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'),
+            'A vencer (R$)': f"R$ {a_vencer:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'),
+            'Recebidos (R$)': f"R$ {recebidos:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'),
+            'Total do Período (R$)': f"R$ {total:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
         }
     
     # Adicionar bloco de resumo
     if resumo:
-        elements.append(Paragraph("Resumo Financeiro", subtitle_style))
-        
-        # Criar tabela de resumo
-        resumo_data = [[k, f"R$ {v:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')] for k, v in resumo.items()]
-        resumo_table = Table(resumo_data, colWidths=[3*inch, 1.5*inch])
-        
-        # Estilo da tabela de resumo
-        resumo_style = TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor(BEGE)),
-            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, -1), font_name),
-            ('FONTSIZE', (0, 0), (-1, -1), 10),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-            ('TOPPADDING', (0, 0), (-1, -1), 8),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-        ])
-        
-        resumo_table.setStyle(resumo_style)
-        elements.append(resumo_table)
-        elements.append(Spacer(1, 0.3*inch))
+        pdf.add_summary_box(resumo)
+        pdf.ln(5)
     
     # Adicionar tabela de dados
-    elements.append(Paragraph("Detalhamento", subtitle_style))
+    pdf.add_title("Detalhamento")
     
     # Preparar dados para a tabela
     if not colunas_selecionadas:
@@ -285,7 +358,7 @@ def gerar_pdf(df, filtros, colunas_selecionadas):
     headers = [mapeamento_colunas.get(col, col.replace('_', ' ').title()) for col in colunas_selecionadas]
     
     # Dados da tabela
-    table_data = [headers]
+    table_data = []
     
     # Formatar dados para a tabela
     for _, row in df.iterrows():
@@ -317,71 +390,19 @@ def gerar_pdf(df, filtros, colunas_selecionadas):
         
         table_data.append(table_row)
     
-    # Criar tabela
-    if len(table_data) > 1:  # Se houver dados além do cabeçalho
-        col_widths = [1.2*inch] * len(headers)  # Largura padrão para todas as colunas
-        
-        # Ajustar larguras específicas
-        for i, header in enumerate(headers):
-            if header in ['Descrição', 'Cliente']:
-                col_widths[i] = 2*inch
-            elif header in ['Valor (R$)', 'A Receber (R$)']:
-                col_widths[i] = 1.5*inch
-            elif header == 'Situação':
-                col_widths[i] = 1*inch
-        
-        table = Table(table_data, colWidths=col_widths)
-        
-        # Estilo da tabela
-        table_style = TableStyle([
-            # Cabeçalho
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor(VIOLETA)),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), font_bold),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            
-            # Corpo da tabela
-            ('FONTNAME', (0, 1), (-1, -1), font_name),
-            ('FONTSIZE', (0, 1), (-1, -1), 9),
-            ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            
-            # Alinhar valores monetários à direita
-            ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
-            
-            # Bordas e espaçamento
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ])
-        
-        # Identificar índice da coluna "Situação"
-        situacao_idx = -1
-        for i, header in enumerate(headers):
-            if header == 'Situação':
-                situacao_idx = i
-                break
-        
-        # Colorir células da coluna "Situação" se existir
-        if situacao_idx >= 0:
-            for i in range(1, len(table_data)):
-                if table_data[i][situacao_idx].lower() == 'em aberto':
-                    table_style.add('BACKGROUND', (situacao_idx, i), (situacao_idx, i), colors.HexColor(AMARELO))
-                    table_style.add('TEXTCOLOR', (situacao_idx, i), (situacao_idx, i), colors.white)
-        
-        # Aplicar estilo à tabela
-        table.setStyle(table_style)
-        elements.append(table)
+    # Adicionar tabela ao PDF
+    if table_data:
+        pdf.add_table(headers, table_data)
     else:
-        elements.append(Paragraph("Nenhum dado disponível para exibição.", normal_style))
+        pdf.set_font('Arial', '', 10)
+        pdf.cell(0, 10, "Nenhum dado disponível para exibição.", 0, 1, 'L')
     
-    # Construir o PDF
-    doc.build(elements, onFirstPage=header_footer, onLaterPages=header_footer)
+    # Salvar PDF em um buffer
+    pdf_buffer = io.BytesIO()
+    pdf.output(pdf_buffer)
+    pdf_buffer.seek(0)
     
-    # Retornar o buffer
-    buffer.seek(0)
-    return buffer
+    return pdf_buffer
 
 # Função para criar um link de download
 def get_download_link(buffer, filename):
